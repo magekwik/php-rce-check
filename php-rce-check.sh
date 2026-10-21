@@ -128,9 +128,10 @@ add_bin() {
   BINS+=("$real")
 }
 
-# PATH binaries
+# PATH binaries. Here-strings (not process substitution) so this works under
+# CloudLinux CageFS and `curl | bash`, where /dev/fd/<n> is not available.
 for name in php php-fpm php-cgi; do
-  while IFS= read -r p; do add_bin "$p"; done < <(type -aP "$name" 2>/dev/null)
+  while IFS= read -r p; do [[ -n "$p" ]] && add_bin "$p"; done <<< "$(type -aP "$name" 2>/dev/null)"
 done
 # versioned names in every PATH dir, plus common vendor locations
 IFS=: read -r -a PATH_DIRS <<< "$PATH"
@@ -152,7 +153,7 @@ while IFS= read -r line; do
   exe="$(printf '%s' "$line" | awk '{print $1}')"
   [[ "$exe" == *php* ]] || continue
   [[ -x "$exe" ]] && { add_bin "$exe"; RUNNING+=("$exe"); }
-done < <(ps -eo args= 2>/dev/null | grep -E '^(/[^ ]*php[^ ]*|php[^ ]*)' | awk '{print $1}' | sort -u)
+done <<< "$(ps -eo args= 2>/dev/null | grep -E '^(/[^ ]*php[^ ]*|php[^ ]*)' | awk '{print $1}' | sort -u)"
 # pids whose /proc exe is php (works even when args are rewritten, e.g. "php-fpm: master process")
 for pid in /proc/[0-9]*; do
   exe="$(readlink -f "$pid/exe" 2>/dev/null)" || continue
@@ -239,7 +240,19 @@ fi
 
 # package source hints
 PKG_HINT=""; FIX_CMD=""
-if command -v rpm >/dev/null 2>&1; then
+# cPanel EasyApache (ea-php*) and CloudLinux alt-php (PHP Selector) are vendor
+# packages, not distro PHP, and update differently. Detect by path so this works
+# even inside CageFS, where `command -v rpm` and $PATH are restricted.
+CP_EA=0; CL_ALT=0
+ls -d /opt/cpanel/ea-php* >/dev/null 2>&1 && CP_EA=1
+ls -d /opt/alt/php* >/dev/null 2>&1 && CL_ALT=1
+if [[ $CP_EA == 1 || $CL_ALT == 1 ]]; then
+  PKG_HINT="cPanel / CloudLinux host. These are vendor PHP packages (ea-php / alt-php), not distro PHP. Run the update as root outside CageFS, then restart the web stack. EOL branches (7.4, 8.0) will NOT get a fix here: migrate those sites to a supported branch."
+  pkgs=""
+  [[ $CP_EA == 1 ]] && pkgs="$pkgs 'ea-php*'"
+  [[ $CL_ALT == 1 ]] && pkgs="$pkgs 'alt-php*'"
+  FIX_CMD="sudo yum update$pkgs && sudo /scripts/restartsrv_apache_php_fpm && sudo /scripts/restartsrv_httpd"
+elif command -v rpm >/dev/null 2>&1; then
   if rpm -q remi-release >/dev/null 2>&1 || ls /etc/yum.repos.d/remi*.repo >/dev/null 2>&1; then
     PKG_HINT="Remi repository detected. php.net says Remi will NOT have today's fix; switch to distro packages or build from source."
   fi
